@@ -28,7 +28,14 @@ If you want to modify the saving directory, please change the default ```--local
 
 ## Pre-training
 
-More details will be updated soon.
+The following script shows how to pre-train a 180M model on the C4 dataset:
+
+```
+cd Fourier-Position-Embedding
+bash commands/run_1024.sh
+```
+
+The configs for other settings are available in the ```configs``` directory.
 
 ## Fine-tuning
 
