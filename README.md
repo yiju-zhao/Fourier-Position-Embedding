@@ -9,8 +9,8 @@ Our code is totally based on OLMo(<https://github.com/allenai/OLMo>). The core c
 To install from source, run the following commands:
 
 ```
-    cd Fourier-Position-Embedding
-    pip install -e .[all]
+cd Fourier-Position-Embedding
+pip install -e .[all]
 ```
 
 ## Data Downloading
@@ -20,12 +20,16 @@ The data preprocessing has been completed by the authors of [OLMo](https://githu
 To download the C4 dataset, run the following script:
 
 ```
-    cd Fourier-Position-Embedding
-    bash commands/run_download.sh
+cd Fourier-Position-Embedding
+bash commands/run_download.sh
 ```
 
 If you want to modify the saving directory, please change the default ```--local_filepath``` in ```scripts/download_data.py```.
 
 ## Pre-training
 
+More details will be updated soon.
+
 ## Fine-tuning
+
+More details will be updated soon.
