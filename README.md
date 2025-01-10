@@ -1,5 +1,11 @@
 # Fourier-Position-Embedding
 
-We will open source our code as soon as possible, likely within a week, as the main contributors of FoPE are currently in their exam period.
+This repository contains the code for the paper "Fourier Position Embedding: Enhancing Attention’s Periodic Extension for Length Generalization".
 
-Our code is totally based on OLMo(https://github.com/allenai/OLMo), which already provides the training and data preprocessing code. The core code of FoPE and main setup is available in the appendix of our paper. If you'd like to reproduce the results immediately, you can also integrate FoPE directly into the OLMo repository.
+Our code is totally based on OLMo(https://github.com/allenai/OLMo). The core code of FoPE and main setup is available in the appendix of our paper, thus you can also integrate FoPE directly into any other repository.
+
+## Data Downloading
+
+## Pre-training
+
+## Fine-tuning
