@@ -17,13 +17,12 @@ model:
   rope: true
   rope_clamp_floor_freq: true
   rope_clamp_floor_to_zero: true
-  rope_fourier: true
-  rope_fourier_init: eye_xavier_norm
-  rope_fourier_init_norm_gain: 0.4
-  rope_fourier_separate_basis: true
-  rope_fourier_separate_head: true
-  rope_fourier_ignore_zero: true
-  freq_emb: false
+  fourier: true
+  fourier_init: eye_xavier_norm
+  fourier_init_norm_gain: 0.4
+  fourier_separate_basis: true
+  fourier_separate_head: true
+  fourier_ignore_zero: true
   flash_attention: true
   attention_dropout: 0.0
   attention_layer_norm: false
