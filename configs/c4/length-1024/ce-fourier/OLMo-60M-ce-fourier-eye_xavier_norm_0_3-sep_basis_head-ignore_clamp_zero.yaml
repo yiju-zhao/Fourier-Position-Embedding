@@ -1,4 +1,4 @@
-run_name: OLMo-60M-ce-1024-fourier-eye_xavier_norm_0_3-sep_basis_head-ignore_clamp_zero-c4
+run_name: OLMo-60M-ce-1024-fourier-eye_xavier_norm_0_3-sep_basis_head-ignore_clamp_zero-books
 seed: 6198
 dry_run: false
 
