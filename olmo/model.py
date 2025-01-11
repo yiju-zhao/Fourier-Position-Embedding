@@ -389,7 +389,7 @@ class RotaryEmbedding(nn.Module):
             return ramp_func
         
         if inv_freq is None:
-            pos_freqs = self.config.rope_theta ** (torch.arange(0, self.dim, 2, device=device, dtype=torch.float) / self.dim)
+            pos_freqs = self.config.rope_theta ** (torch.arange(0, self.dim, 2, device=_non_meta_init_device(self.config), dtype=torch.float) / self.dim)
             inv_freq_extra = 1.0 / pos_freqs
             inv_freq_inter = 1.0 / (self.config.rope_extra_yarn_scale * pos_freqs)
         else:
