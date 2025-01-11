@@ -14,7 +14,6 @@ from torch.optim.optimizer import Optimizer as OptimizerBase
 from . import LayerNormBase
 from .config import OptimizerType, SchedulerConfig, SchedulerType, TrainConfig
 from .torch_util import get_default_device, is_distributed
-from .model import IndependentAttnOut, RotaryLinearLayer
 
 __all__ = [
     "Optimizer",
@@ -853,10 +852,6 @@ def get_param_groups(cfg: TrainConfig, model: nn.Module) -> List[Dict[str, Any]]
             elif pn.endswith("coef"):
                 decay.add(fpn)
                 # no_decay.add(fpn)
-            elif pn.endswith("weight") and (isinstance(m, nn.Linear) or isinstance(m, RotaryLinearLayer)):
-                decay.add(fpn)
-            elif pn.endswith("weight") and isinstance(m, IndependentAttnOut):
-                decay.add(fpn)
             elif pn.endswith("weight") and isinstance(m, (LayerNormBase, nn.LayerNorm)):
                 if cfg.optimizer.decay_norm_and_bias:
                     decay.add(fpn)
