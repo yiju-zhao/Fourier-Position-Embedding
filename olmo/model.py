@@ -328,7 +328,7 @@ class RotaryEmbedding(nn.Module):
         self.init_upper_freq = init_upper_freq if init_upper_freq is not None else self.config.rope_init_upper_freq
         
         self.clamp_floor_freq = clamp_floor_freq if clamp_floor_freq is not None else self.config.rope_clamp_floor_freq
-        if clamp_floor_freq:
+        if self.clamp_floor_freq:
             self.floor_freq_ratio = floor_freq_ratio if floor_freq_ratio is not None else self.config.rope_floor_freq_ratio
             self.floor_freq = 2*torch.pi/self.config.max_sequence_length * self.floor_freq_ratio
             
@@ -338,7 +338,7 @@ class RotaryEmbedding(nn.Module):
             self.floor_freq = 0.0
         
         self.clamp_upper_freq = clamp_upper_freq if clamp_upper_freq is not None else self.config.rope_clamp_upper_freq
-        if clamp_upper_freq:
+        if self.clamp_upper_freq:
             self.upper_freq_ratio = upper_freq_ratio if upper_freq_ratio is not None else self.config.rope_upper_freq_ratio
             self.upper_freq = torch.pi * self.upper_freq_ratio
             
