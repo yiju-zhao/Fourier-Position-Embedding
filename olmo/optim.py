@@ -852,6 +852,8 @@ def get_param_groups(cfg: TrainConfig, model: nn.Module) -> List[Dict[str, Any]]
             elif pn.endswith("coef"):
                 decay.add(fpn)
                 # no_decay.add(fpn)
+            elif pn.endswith("weight") and isinstance(m, nn.Linear):
+                decay.add(fpn)
             elif pn.endswith("weight") and isinstance(m, (LayerNormBase, nn.LayerNorm)):
                 if cfg.optimizer.decay_norm_and_bias:
                     decay.add(fpn)
