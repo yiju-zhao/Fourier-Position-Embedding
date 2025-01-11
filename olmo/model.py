@@ -90,7 +90,7 @@ def init_normal(
         nn.init.normal_(module.weight, mean=0.0, std=std)
 
     # biases
-    if (isinstance(module, nn.Linear) or isinstance(module, RotaryLinearLayer))and module.bias is not None:
+    if isinstance(module, nn.Linear) and module.bias is not None:
         nn.init.zeros_(module.bias)
 
 
@@ -365,11 +365,7 @@ class RotaryEmbedding(nn.Module):
             
             if self.use_rope_cache:
                 # Warm up cache.
-                if self.config.rope_temporal_layer:
-                    for i in range(self.config.n_layers):
-                        self.get_rotary_embedding(config.max_sequence_length, _non_meta_init_device(config), i)
-                else:
-                    self.get_rotary_embedding(config.max_sequence_length, _non_meta_init_device(config))
+                self.get_rotary_embedding(config.max_sequence_length, _non_meta_init_device(config))
     
         
     def extra_yarn(self, inv_freq = None) -> torch.Tensor:
@@ -527,46 +523,25 @@ class RotaryEmbedding(nn.Module):
         use_rope_cache = use_rope_cache or ((not self.freq_learnable) and self.use_rope_cache)
         
         if use_rope_cache:
-            if self.config.rope_temporal_layer:
-                if (
-                    (pos_sin := self.__cache.get(f"{self.prefix}_{self.suffix}_pos_sin_layer{layer_idx}")) is not None
-                    and (pos_cos := self.__cache.get(f"{self.prefix}_{self.suffix}_pos_cos_layer{layer_idx}")) is not None
-                    and pos_sin.shape[-2] >= seq_len
-                    and pos_cos.shape[-2] >= seq_len
-                ):
-                    if pos_sin.device != device:
-                        pos_sin = pos_sin.to(device)
-                        self.__cache[f"{self.prefix}_{self.suffix}_pos_sin_layer{layer_idx}"] = pos_sin
-                    if pos_cos.device != device:
-                        pos_cos = pos_cos.to(device)
-                        self.__cache[f"{self.prefix}_{self.suffix}_pos_cos_layer{layer_idx}"] = pos_cos
+            if (
+                (pos_sin := self.__cache.get(f"{self.prefix}_{self.suffix}_pos_sin")) is not None
+                and (pos_cos := self.__cache.get(f"{self.prefix}_{self.suffix}_pos_cos")) is not None
+                and pos_sin.shape[-2] >= seq_len
+                and pos_cos.shape[-2] >= seq_len
+            ):
+                if pos_sin.device != device:
+                    pos_sin = pos_sin.to(device)
+                    self.__cache[f"{self.prefix}_{self.suffix}_pos_sin"] = pos_sin
+                if pos_cos.device != device:
+                    pos_cos = pos_cos.to(device)
+                    self.__cache[f"{self.prefix}_{self.suffix}_pos_cos"] = pos_cos
                     
-                    if self.prefix == "embed":
-                        return pos_sin[:, :seq_len, :], pos_cos[:, :seq_len, :]
-                    elif self.prefix == "attn":
-                        return pos_sin[:, :, :seq_len, :], pos_cos[:, :, :seq_len, :]
-                    else:
-                        raise ValueError(f"Unsupported prefix: {self.prefix}")
-            else:
-                if (
-                    (pos_sin := self.__cache.get(f"{self.prefix}_{self.suffix}_pos_sin")) is not None
-                    and (pos_cos := self.__cache.get(f"{self.prefix}_{self.suffix}_pos_cos")) is not None
-                    and pos_sin.shape[-2] >= seq_len
-                    and pos_cos.shape[-2] >= seq_len
-                ):
-                    if pos_sin.device != device:
-                        pos_sin = pos_sin.to(device)
-                        self.__cache[f"{self.prefix}_{self.suffix}_pos_sin"] = pos_sin
-                    if pos_cos.device != device:
-                        pos_cos = pos_cos.to(device)
-                        self.__cache[f"{self.prefix}_{self.suffix}_pos_cos"] = pos_cos
-                        
-                    if self.prefix == "embed":
-                        return pos_sin[:, :seq_len, :], pos_cos[:, :seq_len, :]
-                    elif self.prefix == "attn":
-                        return pos_sin[:, :, :seq_len, :], pos_cos[:, :, :seq_len, :]
-                    else:
-                        raise ValueError(f"Unsupported prefix: {self.prefix}")
+                if self.prefix == "embed":
+                    return pos_sin[:, :seq_len, :], pos_cos[:, :seq_len, :]
+                elif self.prefix == "attn":
+                    return pos_sin[:, :, :seq_len, :], pos_cos[:, :, :seq_len, :]
+                else:
+                    raise ValueError(f"Unsupported prefix: {self.prefix}")
 
         with torch.autocast(device.type, enabled=False):
             
@@ -599,12 +574,8 @@ class RotaryEmbedding(nn.Module):
             pos_sin, pos_cos = positions.sin(), positions.cos()
 
         if (not self.freq_learnable) and self.use_rope_cache:
-            if self.config.rope_temporal_layer:
-                self.__cache[f"{self.prefix}_{self.suffix}_pos_sin_layer{layer_idx}"] = pos_sin
-                self.__cache[f"{self.prefix}_{self.suffix}_pos_cos_layer{layer_idx}"] = pos_cos
-            else:
-                self.__cache[f"{self.prefix}_{self.suffix}_pos_sin"] = pos_sin
-                self.__cache[f"{self.prefix}_{self.suffix}_pos_cos"] = pos_cos
+            self.__cache[f"{self.prefix}_{self.suffix}_pos_sin"] = pos_sin
+            self.__cache[f"{self.prefix}_{self.suffix}_pos_cos"] = pos_cos
             
         return pos_sin, pos_cos
 
