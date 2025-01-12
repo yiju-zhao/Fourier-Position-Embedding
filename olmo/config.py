@@ -416,51 +416,6 @@ class ModelConfig(BaseConfig):
     The mode to clamp the frequency to linear.
     """
     
-    rope_extra: bool = False
-    """
-    If ``True``, use length extrapolation in RoPE.
-    """
-    
-    rope_extra_type: str = "PI"
-    """
-    The type of length extrapolation in RoPE, including PI, YARN and CLEX.
-    """
-    
-    rope_extra_before_clamp: bool = False
-    """
-    If ``True``, apply length extrapolation before clamping.
-    """
-    
-    rope_extra_orig_length: int = 0
-    """
-    The original length for length extrapolation in RoPE.
-    """
-    
-    rope_extra_yarn_scale: float = 16.0
-    """
-    The scale for length extrapolation in RoPE.
-    """
-    
-    rope_extra_yarn_beta_fast: float = 32.0
-    """
-    The fast beta for length extrapolation in RoPE.
-    """
-    
-    rope_extra_yarn_beta_slow: float = 1.0
-    """
-    The slow beta for length extrapolation in RoPE.
-    """
-    
-    rope_extra_yarn_factor: float = 1.0
-    """
-    The factor for length extrapolation in RoPE.
-    """
-    
-    rope_extra_fourier_expand: bool = False
-    """
-    If ``True``, expand the Fourier basis in RoPE.
-    """
-    
     fourier: bool = False
     """
     If ``True``, use Fourier basis in RoPE.
@@ -504,6 +459,51 @@ class ModelConfig(BaseConfig):
     fourier_ignore_zero: bool = True
     """
     If ``True``, ignore zero frequency in Fourier.
+    """
+    
+    len_extra: bool = False
+    """
+    If ``True``, use length extrapolation.
+    """
+    
+    len_extra_type: str = "PI"
+    """
+    The type of length extrapolation, including PI, YARN and CLEX.
+    """
+    
+    len_extra_before_clamp: bool = False
+    """
+    If ``True``, apply length extrapolation before clamping.
+    """
+    
+    len_extra_orig_length: int = 0
+    """
+    The original length for length extrapolation.
+    """
+    
+    len_extra_yarn_scale: float = 16.0
+    """
+    The scale for length extrapolation.
+    """
+    
+    len_extra_yarn_beta_fast: float = 32.0
+    """
+    The fast beta for length extrapolation.
+    """
+    
+    len_extra_yarn_beta_slow: float = 1.0
+    """
+    The slow beta for length extrapolation.
+    """
+    
+    len_extra_yarn_factor: float = 1.0
+    """
+    The factor for length extrapolation.
+    """
+    
+    len_extra_fourier_expand: bool = False
+    """
+    If ``True``, expand the Fourier basis.
     """
     
     flash_attention: bool = False

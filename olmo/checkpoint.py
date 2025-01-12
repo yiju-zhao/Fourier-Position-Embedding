@@ -764,15 +764,14 @@ class FullCheckpointer(Checkpointer):
                 state_dict_to_load = load_state_dict(
                     load_path, "model.pt", local_cache=local_cache, map_location="cpu"
                 )
-                # TODO: 对 key 中包含 _coef 的参数，依照现有模型的形状进行扩展
                 
                 for key, value in state_dict_to_load.items():
                     if "_coef" in key:
                         new_value = torch.zeros_like(dist_model.module.state_dict()[key])
                         if value.shape[-2] < new_value.shape[-2] or value.shape[-1] < new_value.shape[-1]:
-                            if dist_model.module.config.rope_extra_fourier_expand:
+                            if dist_model.module.config.len_extra_fourier_expand:
                                 print(f"expand {key} from {value.shape} to {dist_model.module.state_dict()[key].shape}")
-                                torch.nn.init.xavier_normal_(new_value, gain=dist_model.module.config.rope_fourier_init_norm_gain)
+                                torch.nn.init.xavier_normal_(new_value, gain=dist_model.module.config.fourier_init_norm_gain)
                                 
                                 def get_step_eye(_param):
                                     import math
@@ -796,12 +795,7 @@ class FullCheckpointer(Checkpointer):
                         
                         state_dict_to_load[key] = new_value
                         
-                        # print(f"value {value.shape}: {value}")
-                        # print(f"new_value {new_value.shape}: {new_value}")
-                        # exit() # debug
-                        
                 dist_model.module.load_state_dict(state_dict_to_load, strict=False) # TODO: strict=False
-                # dist_model.module.load_state_dict(state_dict_to_load, strict=True)
 
             # Load optimizer state.
             if load_optimizer_state:

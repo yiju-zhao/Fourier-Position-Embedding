@@ -369,12 +369,12 @@ class RotaryEmbedding(nn.Module):
     
         
     def extra_yarn(self, inv_freq = None) -> torch.Tensor:
-        assert self.config.rope_extra_orig_length != 0
+        assert self.config.len_extra_orig_length != 0
         
-        def find_correction_dim(num_rotations, dim, base=self.config.rope_theta, orig_max_position_embeddings=self.config.rope_extra_orig_length):
+        def find_correction_dim(num_rotations, dim, base=self.config.rope_theta, orig_max_position_embeddings=self.config.len_extra_orig_length):
             return (dim * math.log(orig_max_position_embeddings/(num_rotations * 2 * math.pi)))/(2 * math.log(base))
 
-        def find_correction_range(low_rot, high_rot, dim, base=self.config.rope_theta, orig_max_position_embeddings=self.config.rope_extra_orig_length):
+        def find_correction_range(low_rot, high_rot, dim, base=self.config.rope_theta, orig_max_position_embeddings=self.config.len_extra_orig_length):
             low = math.floor(find_correction_dim(
                 low_rot, dim, base, orig_max_position_embeddings))
             high = math.ceil(find_correction_dim(
@@ -391,21 +391,21 @@ class RotaryEmbedding(nn.Module):
         if inv_freq is None:
             pos_freqs = self.config.rope_theta ** (torch.arange(0, self.dim, 2, device=_non_meta_init_device(self.config), dtype=torch.float) / self.dim)
             inv_freq_extra = 1.0 / pos_freqs
-            inv_freq_inter = 1.0 / (self.config.rope_extra_yarn_scale * pos_freqs)
+            inv_freq_inter = 1.0 / (self.config.len_extra_yarn_scale * pos_freqs)
         else:
             inv_freq_extra = inv_freq
-            inv_freq_inter = inv_freq / self.config.rope_extra_yarn_scale
+            inv_freq_inter = inv_freq / self.config.len_extra_yarn_scale
        
-        low, high = find_correction_range(self.config.rope_extra_yarn_beta_fast, self.config.rope_extra_yarn_beta_slow, self.dim)
-        inv_freq_mask = (1 - linear_ramp_mask(low, high, self.dim // 2).float().to(_non_meta_init_device(self.config))) * self.config.rope_extra_yarn_factor
+        low, high = find_correction_range(self.config.len_extra_yarn_beta_fast, self.config.len_extra_yarn_beta_slow, self.dim)
+        inv_freq_mask = (1 - linear_ramp_mask(low, high, self.dim // 2).float().to(_non_meta_init_device(self.config))) * self.config.len_extra_yarn_factor
         inv_freq = inv_freq_inter * (1 - inv_freq_mask) + inv_freq_extra * inv_freq_mask
         
         return inv_freq
     
     def extra_pi(self, inv_freq = None) -> torch.Tensor:
-        assert self.config.rope_extra_orig_length != 0
+        assert self.config.len_extra_orig_length != 0
             
-        self.pi_ratio = self.config.rope_extra_orig_length / self.config.max_sequence_length
+        self.pi_ratio = self.config.len_extra_orig_length / self.config.max_sequence_length
         
         inv_freq = inv_freq * self.pi_ratio
         
@@ -435,11 +435,11 @@ class RotaryEmbedding(nn.Module):
         
         inv_freq = self.init_floor_freq + inv_freq * (self.init_upper_freq - self.init_floor_freq)
         
-        if self.config.rope_extra and self.config.rope_extra_before_clamp:
-            if self.config.rope_extra_type == "PI":
+        if self.config.len_extra and self.config.len_extra_before_clamp:
+            if self.config.len_extra_type == "PI":
                 inv_freq = self.extra_pi(inv_freq)
         
-            elif self.config.rope_extra_type == "YARN":
+            elif self.config.len_extra_type == "YARN":
                 inv_freq = self.extra_yarn(inv_freq)
         
         if self.clamp_floor_freq:
@@ -488,11 +488,11 @@ class RotaryEmbedding(nn.Module):
                 else:
                     inv_freq[non_zero_freq_indeces[-reset_freq_num:]] = 0.0
                     
-        if self.config.rope_extra and not self.config.rope_extra_before_clamp:
-            if self.config.rope_extra_type == "PI":
+        if self.config.len_extra and not self.config.len_extra_before_clamp:
+            if self.config.len_extra_type == "PI":
                 inv_freq = self.extra_pi(inv_freq)
         
-            elif self.config.rope_extra_type == "YARN":
+            elif self.config.len_extra_type == "YARN":
                 inv_freq = self.extra_yarn(inv_freq)
         
         if self.include_neg_freq:
