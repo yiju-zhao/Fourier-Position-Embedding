@@ -3,9 +3,9 @@ seed: 6198
 dry_run: false
 
 wandb:
-  entity: messi-hua
+  entity: todo
   name: ${run_name}
-  project: olmo-tiny
+  project: olmo-fope
 
 model:
   d_model: 1024
