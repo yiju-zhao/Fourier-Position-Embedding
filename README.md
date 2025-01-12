@@ -28,7 +28,7 @@ If you want to modify the saving directory, please change the default ```--local
 
 ## Pre-training
 
-The following script shows how to pre-train a 180M model on the C4 dataset:
+The following script shows how to pre-train a 60M model on the C4 dataset:
 
 ```
 cd Fourier-Position-Embedding
@@ -39,4 +39,11 @@ The configs for other settings are available in the ```configs``` directory.
 
 ## Fine-tuning
 
-More details will be updated soon.
+The following script shows how to extrapolate a 60M model on the C4 dataset:
+
+```
+cd Fourier-Position-Embedding
+bash commands/run_finetune.sh
+```
+
+You may modify the ```eval_interval``` and ```save_interval_unsharded``` in the configs to get more fine-grained checkpoints.
