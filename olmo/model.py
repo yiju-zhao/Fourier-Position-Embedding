@@ -269,7 +269,29 @@ class RMSLayerNorm(LayerNormBase):
         
 class RotaryEmbedding(nn.Module):
     """
-    [Rotary positional embeddings (RoPE)](https://arxiv.org/abs/2104.09864).
+    旋转位置编码（RoPE，Rotary Positional Embeddings）
+
+    参考文献：https://arxiv.org/abs/2104.09864
+
+    RoPE 通过将每个 query/key 向量在复平面上"旋转"来注入位置信息，而不是像原始 Transformer 那样"加"上位置向量。
+    具体来说，每对偶/奇隐藏维度被视为一个复数。对于位置 t 和频率索引 i，旋转角度为 φ = t · θᵢ，其中：
+
+        θᵢ = 1 / θ^{2i/d}
+
+    θ 通常取 10,000。旋转可用如下 2×2 矩阵实现：
+
+        (x₀, x₁) → (x₀ · cos φ − x₁ · sin φ,
+                    x₀ · sin φ + x₁ · cos φ)
+
+    这种方式可以保持向量点积仅与相对位置有关，使模型既能感知相对位置，也能保留绝对位置信息。
+
+    本实现在原始 RoPE 基础上做了大量扩展：
+    - 支持可学习频率（freq_learnable），可选每个头不同（rope_no_repetition）
+    - 支持多种频率分布（uniform, gaussian, exponential, linear, constant）
+    - 支持频率裁剪（clamp_floor_freq, clamp_upper_freq），可零化或对齐到线性网格（clamp_to_linear）
+    - 支持对 embedding 层（prefix="embed"）和 attention 层（prefix="attn"）分别应用 RoPE
+
+    该类的主要工作是构造逆频率表 inv_freq，缓存正弦/余弦张量以加速推理，并处理各种配置选项，便于研究不同位置编码变体。
     """
 
     def __init__(
@@ -369,83 +391,120 @@ class RotaryEmbedding(nn.Module):
     
         
     def extra_yarn(self, inv_freq = None) -> torch.Tensor:
+        # YaRN 核心函数：通过混合 extra 和 inter 频率解决长度外推问题
+        """
+        YaRN（Yet Another RoPE eXtrapolatioN）——RoPE长度外推增强
+
+        YaRN 主要解决"长度外推"问题：模型通常只在固定长度（如2k token）上训练，但推理时希望能泛化到更长序列。
+        核心思想是"混合"两种频率表：
+        1. 标准 RoPE 的频率 inv_freq_extra（训练长度内外一致）
+        2. 压缩频谱的 inv_freq_inter（通过 len_extra_yarn_scale 缩放频率，使长距离旋转变慢）
+
+        通过线性 ramp（由 len_extra_yarn_beta_fast/beta_slow 控制）生成 mask，
+        在 ramp 区间平滑过渡，两端分别用纯 extra 或纯 inter 频率。
+        最终返回的 inv_freq 可直接用于后续位置编码。
+
+        这种方法能让模型在远超训练长度的上下文中依然稳定推理，避免位置编码外推时的数值爆炸。
+        """
         assert self.config.len_extra_orig_length != 0
         
         def find_correction_dim(num_rotations, dim, base=self.config.rope_theta, orig_max_position_embeddings=self.config.len_extra_orig_length):
+            # 根据给定的旋转次数计算对应的维度索引
+            # 公式来源于 RoPE 频率计算的逆向推导
             return (dim * math.log(orig_max_position_embeddings/(num_rotations * 2 * math.pi)))/(2 * math.log(base))
 
         def find_correction_range(low_rot, high_rot, dim, base=self.config.rope_theta, orig_max_position_embeddings=self.config.len_extra_orig_length):
+            # 计算需要进行频率混合的维度范围
+            # low_rot 和 high_rot 是 beta_fast 和 beta_slow 参数，控制混合的频率范围
             low = math.floor(find_correction_dim(
                 low_rot, dim, base, orig_max_position_embeddings))
             high = math.ceil(find_correction_dim(
                 high_rot, dim, base, orig_max_position_embeddings))
-            return max(low, 0), min(high, dim-1)  # Clamp values just in case
+            return max(low, 0), min(high, dim-1)  # 确保索引在合法范围内
 
         def linear_ramp_mask(low, fast, dim):
+            # 生成线性过渡掩码，用于平滑混合两种频率
+            # 在 [low, fast] 区间内从 0 线性增长到 1
             if low == fast:
-                fast += 0.001  # Prevent singularity
+                fast += 0.001  # 防止除零错误
             linear_func = (torch.arange(dim, dtype=torch.float32) - low) / (fast - low)
-            ramp_func = torch.clamp(linear_func, 0, 1)
+            ramp_func = torch.clamp(linear_func, 0, 1)  # 限制在 [0, 1] 范围内
             return ramp_func
         
         if inv_freq is None:
+            # 计算标准 RoPE 频率
             pos_freqs = self.config.rope_theta ** (torch.arange(0, self.dim, 2, device=_non_meta_init_device(self.config), dtype=torch.float) / self.dim)
-            inv_freq_extra = 1.0 / pos_freqs
-            inv_freq_inter = 1.0 / (self.config.len_extra_yarn_scale * pos_freqs)
+            inv_freq_extra = 1.0 / pos_freqs  # 原始频率（训练长度内外一致）
+            inv_freq_inter = 1.0 / (self.config.len_extra_yarn_scale * pos_freqs)  # 压缩频率（长距离旋转变慢）
         else:
-            inv_freq_extra = inv_freq
-            inv_freq_inter = inv_freq / self.config.len_extra_yarn_scale
+            inv_freq_extra = inv_freq  # 使用传入的频率作为基础
+            inv_freq_inter = inv_freq / self.config.len_extra_yarn_scale  # 对基础频率进行缩放
        
+        # 计算混合范围并生成掩码
         low, high = find_correction_range(self.config.len_extra_yarn_beta_fast, self.config.len_extra_yarn_beta_slow, self.dim)
         inv_freq_mask = (1 - linear_ramp_mask(low, high, self.dim // 2).float().to(_non_meta_init_device(self.config))) * self.config.len_extra_yarn_factor
+        # 根据掩码混合两种频率：低频用 extra，高频用 inter，中间平滑过渡
         inv_freq = inv_freq_inter * (1 - inv_freq_mask) + inv_freq_extra * inv_freq_mask
         
         return inv_freq
     
     def extra_pi(self, inv_freq = None) -> torch.Tensor:
+        # Position Interpolation (PI) 方法的简单实现
+        # 通过缩放频率来实现位置的线性插值，使长序列在训练范围内的位置被“压缩”
         assert self.config.len_extra_orig_length != 0
             
+        # 计算压缩比例：原始训练长度 / 目标最大长度
         self.pi_ratio = self.config.len_extra_orig_length / self.config.max_sequence_length
         
+        # 通过缩放频率来实现位置压缩
         inv_freq = inv_freq * self.pi_ratio
         
         return inv_freq
     
     def get_inv_freq(self, dim: int, device: torch.device) -> torch.Tensor:
+        # 生成逆频率序列的核心函数，支持多种频率分布和各种裁剪策略
         if self.freq_distribution == "constant": # self.config.rope_no_rotary:
+            # 常数频率分布：所有频率都相等，相当于去除位置编码
             torch.ones_like(torch.arange(0, dim, 2, device=device, dtype=torch.float))
         elif self.freq_distribution == "linear": # self.config.rope_linear:
+            # 线性频率分布：频率与维度索引成正比
             inv_freq = 2*torch.pi/self.config.max_sequence_length * torch.arange(0, dim, 2, device=device, dtype=torch.float) 
             
             inv_freq[inv_freq > self.clamp_upper_ratio * torch.pi] = self.clamp_upper_value
             
-            # 翻转，保持频率递减
+            # 翻转，保持频率递减规律（与标准 RoPE 一致）
             inv_freq = inv_freq.flip(0)
             
         elif self.freq_distribution == "uniform": # self.config.rope_uniform:
+            # 均匀频率分布：频率从 [0, 1] 均匀采样
             inv_freq = 1.0 * torch.rand(dim//2, device=device, dtype=torch.float)
             
         elif self.freq_distribution == "gaussian": # self.config.rope_gaussian:
+            # 高斯频率分布：频率从高斯分布采样并取绝对值
             inv_freq = torch.randn(dim//2, device=device, dtype=torch.float).abs()
-            inv_freq = inv_freq / inv_freq.max()
+            inv_freq = inv_freq / inv_freq.max()  # 归一化到 [0, 1] 范围
         else:
+            # 指数频率分布（标准 RoPE）：频率与维度索引成指数关系
             inv_freq = 1.0 / (
                 self.config.rope_theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float) / dim)
             )
         
+        # 将频率缩放到指定范围 [init_floor_freq, init_upper_freq]
         inv_freq = self.init_floor_freq + inv_freq * (self.init_upper_freq - self.init_floor_freq)
         
+        # 在裁剪之前应用长度外推方法
         if self.config.len_extra and self.config.len_extra_before_clamp:
             if self.config.len_extra_type == "PI":
-                inv_freq = self.extra_pi(inv_freq)
+                inv_freq = self.extra_pi(inv_freq)  # Position Interpolation 方法
         
             elif self.config.len_extra_type == "YARN":
-                inv_freq = self.extra_yarn(inv_freq)
+                inv_freq = self.extra_yarn(inv_freq)  # YaRN 方法
         
+        # 频率裁剪：限制频率在指定范围内
         if self.clamp_floor_freq:
-            inv_freq[inv_freq < self.floor_freq] = self.clamp_floor_value
+            inv_freq[inv_freq < self.floor_freq] = self.clamp_floor_value  # 低频裁剪
         if self.clamp_upper_freq:
-            inv_freq[inv_freq > self.upper_freq] = self.clamp_upper_value
+            inv_freq[inv_freq > self.upper_freq] = self.clamp_upper_value  # 高频裁剪
             
         if self.clamp_to_linear:
             freq_ratio = inv_freq / (2*torch.pi/self.config.max_sequence_length)
@@ -520,8 +579,10 @@ class RotaryEmbedding(nn.Module):
         layer_idx: Optional[int] = None,
         use_rope_cache: bool = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # 生成旋转位置编码的正弦余弦值，支持缓存机制加速推理
         use_rope_cache = use_rope_cache or ((not self.freq_learnable) and self.use_rope_cache)
         
+        # 检查缓存是否可用且包含足够长度的位置编码
         if use_rope_cache:
             if (
                 (pos_sin := self.__cache.get(f"{self.prefix}_{self.suffix}_pos_sin")) is not None
@@ -545,6 +606,7 @@ class RotaryEmbedding(nn.Module):
 
         with torch.autocast(device.type, enabled=False):
             
+            # 如果频率可学习，需要对频率参数进行动态裁剪
             if self.freq_learnable:
                 if self.clamp_floor_freq or self.clamp_upper_freq:
                     sign = self.inv_freq.data.sign()
@@ -552,27 +614,31 @@ class RotaryEmbedding(nn.Module):
                         2*torch.pi/self.config.max_sequence_length*self.clamp_floor_ratio, torch.pi*self.clamp_upper_ratio
                     ).mul_(sign)
                 else:
-                    self.inv_freq.data.clamp_(-torch.pi, torch.pi)
+                    self.inv_freq.data.clamp_(-torch.pi, torch.pi)  # 默认裁剪范围
             
+            # 生成位置序列
             if self.config.rope_no_pos:
-                seq = torch.ones(seq_len, device=device, dtype=torch.float) # ablation
+                seq = torch.ones(seq_len, device=device, dtype=torch.float) # 消融实验：全部位置都设为 1
             else:
-                seq = torch.arange(seq_len, device=device, dtype=torch.float) # original
+                seq = torch.arange(seq_len, device=device, dtype=torch.float) # 正常情况：0, 1, 2, ..., seq_len-1
             
+            # 计算每个位置和每个频率的相位角度
             if self.prefix == "embed":
-                freqs = torch.einsum("t, d -> td", seq, self.inv_freq) # shape: (seq_len, dim//2)
+                freqs = torch.einsum("t, d -> td", seq, self.inv_freq) # 嵌入层用：(seq_len, dim//2)
             elif self.prefix == "attn":
-                freqs = torch.einsum("t, hd -> htd", seq, self.inv_freq) # shape: (1 or n_heads, seq_len, dim//2)
+                freqs = torch.einsum("t, hd -> htd", seq, self.inv_freq) # 注意力层用：(1 or n_heads, seq_len, dim//2)
             else:
                 raise ValueError(f"Unsupported prefix: {self.prefix}")
             
+            # 根据不同的后缀生成位置编码
             if self.suffix == "fourier": 
-                positions = freqs.unsqueeze(0) # shape: (1, 1 or n_heads, seq_len, dim//2) or (1, seq_len, dim//2)
+                positions = freqs.unsqueeze(0) # FoPE：保持原始维度
             else:
-                positions = torch.cat((freqs, freqs), dim=-1).unsqueeze(0) # shape: (1, 1 or n_heads, seq_len, dim) or (1, seq_len, dim)
+                positions = torch.cat((freqs, freqs), dim=-1).unsqueeze(0) # RoPE：重复频率以匹配完整维度
                 
-            pos_sin, pos_cos = positions.sin(), positions.cos()
+            pos_sin, pos_cos = positions.sin(), positions.cos()  # 计算正弦余弦值
 
+        # 将结果缓存以加速后续计算（仅在频率不可学习时）
         if (not self.freq_learnable) and self.use_rope_cache:
             self.__cache[f"{self.prefix}_{self.suffix}_pos_sin"] = pos_sin
             self.__cache[f"{self.prefix}_{self.suffix}_pos_cos"] = pos_cos
@@ -580,21 +646,25 @@ class RotaryEmbedding(nn.Module):
         return pos_sin, pos_cos
 
     def rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+        # 实现复数旋转的关键操作：将向量的后半部分取负并与前半部分交换
         if self.prefix == "embed":
             B, T, hs = x.size()
-            x = x.view(B, T, 2, hs // 2)
+            x = x.view(B, T, 2, hs // 2)  # 将向量重塑为偶数对
             
         elif self.prefix == "attn":
             B, nh, T, hs = x.size()
-            x = x.view(B, nh, T, 2, hs // 2)
+            x = x.view(B, nh, T, 2, hs // 2)  # 将向量重塑为偶数对
             
-        x1, x2 = x.unbind(dim=-2)
-        return torch.cat((-x2, x1), dim=-1)
+        x1, x2 = x.unbind(dim=-2)  # 分离偶数对的前后半部分
+        return torch.cat((-x2, x1), dim=-1)  # 实现复数乘法中的 i 操作
 
     def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+        # 应用旋转位置编码的核心函数，实现 (x + iy) * e^(iθ) 的复数旋转
         if not inverse:
+            # 正向旋转： t * cos(θ) + rotate_half(t) * sin(θ)
             return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
         else:
+            # 逆向旋转： t * cos(θ) - rotate_half(t) * sin(θ)
             return ((t * pos_cos) - (self.rotate_half(t) * pos_sin)).to(t.dtype)
     
     def forward(
@@ -605,26 +675,31 @@ class RotaryEmbedding(nn.Module):
         inverse: bool = False,
         use_rope_cache: bool = None
     ) -> torch.Tensor:
+        # RotaryEmbedding 前向传播函数：对输入张量应用旋转位置编码
         
+        # 如果需要全精度计算，将输入转为 float32
         if self.config.rope_full_precision:
             x_ = x.float()
         else:
             x_ = x
         
         with torch.autocast(x.device.type, enabled=False):
-            x_len = x_.shape[-2]
+            x_len = x_.shape[-2]  # 获取输入序列的实际长度
+            # 获取对应的正弦余弦位置编码
             pos_sin, pos_cos = self.get_rotary_embedding(all_len, x_.device, layer_idx=layer_idx, use_rope_cache=use_rope_cache)
             pos_sin = pos_sin.type_as(x_)
             pos_cos = pos_cos.type_as(x_)
             
             if self.prefix == "embed":
+                # 嵌入层情况：位置编码的形状为 (1, seq_len, dim)
                 x_ = self.apply_rotary_pos_emb(
-                    pos_sin[:, all_len - x_len : x_len, :], 
-                    pos_cos[:, all_len - x_len : x_len, :], 
+                    pos_sin[:, all_len - x_len : all_len, :], 
+                    pos_cos[:, all_len - x_len : all_len, :], 
                     x_,
                     inverse
                 )
             elif self.prefix == "attn":
+                # 注意力层情况：位置编码的形状为 (1, n_heads, seq_len, dim)
                 x_ = self.apply_rotary_pos_emb(
                     pos_sin[:, :, all_len - x_len : all_len, :], 
                     pos_cos[:, :, all_len - x_len : all_len, :], 
@@ -634,7 +709,7 @@ class RotaryEmbedding(nn.Module):
             else:
                 raise ValueError(f"Unsupported prefix: {self.prefix}")
             
-        return x_.type_as(x)
+        return x_.type_as(x)  # 返回时恢复原始数据类型
     
 class InverseRotaryEmbedding(RotaryEmbedding):
     def __init__(self, *args, **kwargs):
@@ -645,38 +720,66 @@ class InverseRotaryEmbedding(RotaryEmbedding):
         return super().forward(x, all_len, layer_idx=layer_idx, use_rope_cache=use_rope_cache, inverse=True)
 
 class FourierEmbedding(RotaryEmbedding):
+    """
+    傅里叶位置编码（FoPE，Fourier Positional Embeddings）
+
+    FoPE 在 RoPE 的基础上进一步扩展：先用 RoPE 得到一组正弦/余弦基，再通过一个可学习（或固定）的线性变换（Fourier 矩阵）
+    对这些基进行混合。可以理解为 RoPE 提供了丰富的频率，FoPE 让模型自动学习哪些频率组合对任务最有用。
+
+    本实现的主要特性：
+    - 支持降维：input_dim（RoPE 频率数）可以远大于 output_dim（实际注入模型的维度），便于探索丰富频谱而不增加内存
+    - 支持每个头独立基（fourier_separate_head）或共享基
+    - 支持正弦/余弦分开权重（fourier_separate_basis）或合并权重
+    - 支持多种初始化方式（fourier_init*），如单位阵、加噪声、Xavier等，便于对比"从RoPE出发"还是"随机初始化"
+
+    运行时，先和 RoPE 一样计算 pos_sin/pos_cos，再用 Fourier 权重投影得到 fourier_sin/fourier_cos，
+    必要时补零，最后用和 RoPE 相同的旋转方式注入到注意力机制中。
+    """
+
     def __init__(self, config, *args, **kwargs):
         self.config = config
         
+        # 计算注意力头维度
         self.head_dim = self.config.d_model // self.config.n_heads
+        # 选择输入维度：如果配置的 fourier_dim 较大则使用它，否则使用头维度
         dim = self.config.fourier_dim if self.config.fourier_dim > self.head_dim else self.head_dim
         
+        # 调用父类 RotaryEmbedding 的初始化
         super().__init__(config, dim=dim, *args, **kwargs)
         
         self.suffix = "fourier"
         
+        # 计算输入和输出维度
         if self.config.fourier_ignore_zero:
+            # 如果忽略零频率，则输入维度为非零频率的数量
             self.input_dim = self.inv_freq.size(-1)
             self.output_dim = min(self.input_dim, self.head_dim//4) # TODO: self.head_dim//8
         else:
+            # 正常情况下的输入输出维度
             self.input_dim = self.dim // 2
             self.output_dim = self.head_dim // 2
         
+        # 设置输入输出张量的形状模式（用于 einsum 操作）
         if self.prefix == "embed":
-            self.input_shape = "btD"
-            self.output_shape = "btd"
+            self.input_shape = "btD"  # (batch, time, input_dim)
+            self.output_shape = "btd"  # (batch, time, output_dim)
         elif self.prefix == "attn":
-            self.input_shape = "bhtD"
-            self.output_shape = "bhtd"
+            self.input_shape = "bhtD"  # (batch, head, time, input_dim)
+            self.output_shape = "bhtd"  # (batch, head, time, output_dim)
             
+        # 设置僅里叶系数的形状
         if self.prefix == "attn" and self.config.fourier_separate_head:
+            # 每个注意力头都有独立的僅里叶系数
             size = (self.config.n_heads, self.input_dim, self.output_dim)
-            self.coef_shape = "hDd"
+            self.coef_shape = "hDd"  # (head, input_dim, output_dim)
         else:
+            # 所有注意力头共享同一个僅里叶系数
             size = (self.input_dim, self.output_dim)
-            self.coef_shape = "Dd"
+            self.coef_shape = "Dd"  # (input_dim, output_dim)
         
+        # 初始化僅里叶系数参数
         if self.config.fourier_separate_basis:
+            # 正弦和余弦分开的系数矩阵
             self.sin_coef = nn.Parameter(
                 torch.randn(size=size, device=_non_meta_init_device(self.config), dtype=torch.float),
                 requires_grad=self.config.fourier_learnable
@@ -686,6 +789,7 @@ class FourierEmbedding(RotaryEmbedding):
                 requires_grad=self.config.fourier_learnable
             )
         else:
+            # 正弦和余弦共享同一个系数矩阵
             self.fourier_coef = nn.Parameter(
                 torch.randn(size=size, device=_non_meta_init_device(self.config), dtype=torch.float),
                 requires_grad=self.config.fourier_learnable
@@ -694,44 +798,60 @@ class FourierEmbedding(RotaryEmbedding):
         self.reset_parameters()
     
     def apply_rotary_pos_emb(self, pos_sin, pos_cos, t, inverse = False):
+        # FoPE 中的旋转位置编码应用：先通过僅里叶系数投影，再应用旋转
+        # 通过僅里叶系数矩阵将 RoPE 频率投影到目标维度
         if self.config.fourier_separate_basis:
+            # 正弦和余弦分开的系数矩阵
             if self.config.fourier_norm:
+                # 对系数矩阵进行归一化（按输入维度求和）
                 fourier_sin = torch.einsum(f"{self.input_shape}, {self.coef_shape} -> {self.output_shape}", pos_sin, self.sin_coef / self.sin_coef.sum(dim=-2, keepdim=True))
                 fourier_cos = torch.einsum(f"{self.input_shape}, {self.coef_shape} -> {self.output_shape}", pos_cos, self.cos_coef / self.cos_coef.sum(dim=-2, keepdim=True))
             else:
+                # 直接使用系数矩阵
                 fourier_sin = torch.einsum(f"{self.input_shape}, {self.coef_shape} -> {self.output_shape}", pos_sin, self.sin_coef)
                 fourier_cos = torch.einsum(f"{self.input_shape}, {self.coef_shape} -> {self.output_shape}", pos_cos, self.cos_coef)
         else:
+            # 正弦和余弦共享同一个系数矩阵
             if self.config.fourier_norm:
+                # 对系数矩阵进行归一化
                 fourier_sin = torch.einsum(f"{self.input_shape}, {self.coef_shape} -> {self.output_shape}", pos_sin, self.fourier_coef / self.fourier_coef.sum(dim=-2, keepdim=True))
                 fourier_cos = torch.einsum(f"{self.input_shape}, {self.coef_shape} -> {self.output_shape}", pos_cos, self.fourier_coef / self.fourier_coef.sum(dim=-2, keepdim=True))
             else:
+                # 直接使用系数矩阵
                 fourier_sin = torch.einsum(f"{self.input_shape}, {self.coef_shape} -> {self.output_shape}", pos_sin, self.fourier_coef)
                 fourier_cos = torch.einsum(f"{self.input_shape}, {self.coef_shape} -> {self.output_shape}", pos_cos, self.fourier_coef)
         
+        # 如果忽略零频率，需要在高维度上补零以匹配头维度
         if self.config.fourier_ignore_zero:
             fourier_sin = F.pad(input=fourier_sin, pad=(0, self.head_dim//2-fourier_sin.size(-1)), mode="constant", value=1)
             fourier_cos = F.pad(input=fourier_cos, pad=(0, self.head_dim//2-fourier_cos.size(-1)), mode="constant", value=1)
         
+        # 将频率重复一次以匹配完整的头维度（因为旋转是成对进行的）
         fourier_sin = torch.cat((fourier_sin, fourier_sin), dim=-1)
         fourier_cos = torch.cat((fourier_cos, fourier_cos), dim=-1)
         
+        # 使用僅里叶变换后的频率进行旋转
         if not inverse:
+            # 正向旋转：使用 FoPE 投影后的频率
             return ((t * fourier_cos) + (self.rotate_half(t) * fourier_sin)).to(t.dtype)
         else:
+            # 逆向旋转：使用 FoPE 投影后的频率
             return ((t * fourier_cos) - (self.rotate_half(t) * fourier_sin)).to(t.dtype)
     
     def get_step_eye(self, _param):
+        # 生成步长单位矩阵：当输入维度 > 输出维度时使用
+        # 这种初始化方式在输入维度上按步长采样，实现降维效果
         _param = torch.zeros_like(_param)
         
-        step = math.ceil(self.input_dim / self.output_dim)
+        step = math.ceil(self.input_dim / self.output_dim)  # 计算采样步长
         for i in range(self.output_dim):
             if i*step < self.input_dim:
-                _param[..., i*step, i] = 1.0
+                _param[..., i*step, i] = 1.0  # 在对角线上按步长设置 1
         
         return _param
     
     def reset_parameters(self):
+        # 重置僅里叶系数参数，支持多种初始化策略
         with torch.no_grad():
             if self.config.fourier_separate_basis:
                 if self.config.fourier_init == "eye":
